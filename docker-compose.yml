@@ -1,28 +1,50 @@
-version: '2'
 services:
+  authority:
+    build: ./authority-node
+    ports:
+      - "4000:4000"
+    networks:
+      - blockchain
+
   node1:
-    build:
-      context: ./
-      dockerfile: Dockerfile
+    build: ./blockchain
     ports:
-    - "3001:3001"
+      - "3001:3001"
+      - "6001:6001"
+    environment:
+      - NODE_ID=3001
+      - HTTP_PORT=3001
+      - P2P_PORT=6001
+      - PEERS=ws://node2:6001,ws://node3:6001
+    networks:
+      - blockchain
+
   node2:
-    environment:
-      - PEERS=ws://node1:6001
-    build:
-      context: ./
-      dockerfile: Dockerfile
+    build: ./blockchain
     ports:
-    - "3002:3001"
-    links:
-      - node1:node1
+      - "3002:3001"
+      - "6002:6001"
+    environment:
+      - NODE_ID=3002
+      - HTTP_PORT=3001
+      - P2P_PORT=6001
+      - PEERS=ws://node1:6001,ws://node3:6001
+    networks:
+      - blockchain
+
   node3:
-    environment:
-      - PEERS=ws://node2:6001
-    build:
-      context: ./
-      dockerfile: Dockerfile
+    build: ./blockchain
     ports:
-    - "3003:3001"
-    links:
-      - node2:node2
+      - "3003:3001"
+      - "6003:6001"
+    environment:
+      - NODE_ID=3003
+      - HTTP_PORT=3001
+      - P2P_PORT=6001
+      - PEERS=ws://node1:6001,ws://node2:6001
+    networks:
+      - blockchain
+
+networks:
+  blockchain:
+    driver: bridge
