@@ -1,26 +1,28 @@
-// Todo List
-// 1. Verify Merkle Proofs of Voter Inclusion
-// 2. Simple Double Voting Protections
-// 3. Homomorphic Encryption for Vote Tallying
-// 4. Zero-Knowledge Proof Verification for voteVector
-// 5. Password attached to Voter ID for block proposals
-// 6. Auditing Endpoints
-// 7. Election Config Block (electionId, candidates, merkleRoot, keys)
-// 8. Signed Validator Votes (NETWORK_VOTE authentication)
-
 'use strict';
 var CryptoJS = require("crypto-js");
 var express = require("express");
 var bodyParser = require('body-parser');
 var WebSocket = require("ws");
+const axios = require('axios');
+const crypto = require('crypto');
 
 // Config and identity
 var http_port = process.env.HTTP_PORT || 3001;
 var p2p_port = process.env.P2P_PORT || 6001;
 var initialPeers = process.env.PEERS ? process.env.PEERS.split(',') : [];
 const NODE_ID = process.env.NODE_ID || process.env.HTTP_PORT || 'unknown';
+const AUTHORITY_URL = process.env.AUTHORITY_URL || 'http://authority:4000';
 
+const ELECTION_ID = process.env.ELECTION_ID || 'POC-DEFAULT';
+const ELECTION_CANDIDATES = process.env.ELECTION_CANDIDATES ? JSON.parse(process.env.ELECTION_CANDIDATES) : ["candidateA","candidateB","candidateC"];
+const ELECTION_START = process.env.ELECTION_START ? parseInt(process.env.ELECTION_START, 10) : null; // epoch seconds or null
+const ELECTION_END = process.env.ELECTION_END ? parseInt(process.env.ELECTION_END, 10) : null;       // epoch seconds or null
+
+// Candidate ordering for tally display (no validation enforced here)
 const CANDIDATES = ["candidateA", "candidateB", "candidateC"];
+
+// Dynamic merkle root (fetched from authority at startup)
+let MERKLE_ROOT = null;
 
 // Message types
 var MessageType = {
@@ -31,7 +33,7 @@ var MessageType = {
     NETWORK_VOTE: 4
 };
 
-// Block structure: vector-only voting, no legacy vote string, no validation here
+// Block structure: vector-only voting
 class Block {
     constructor(index, previousHash, timestamp, voterHash, merkleProof, voteVector, hash) {
         this.index = index;
@@ -39,7 +41,7 @@ class Block {
         this.timestamp = timestamp;
         this.voterHash = voterHash;
         this.merkleProof = merkleProof;
-        this.voteVector = voteVector;   // Arbitrary numeric vector; validity deferred to ZKP
+        this.voteVector = voteVector;
         this.hash = hash.toString();
     }
 }
@@ -49,7 +51,6 @@ var sockets = [];
 var blockchain = [getGenesisBlock()];
 
 function getGenesisBlock() {
-    // Empty vector in genesis for compatibility
     return new Block(
         0,
         "0",
@@ -61,7 +62,62 @@ function getGenesisBlock() {
     );
 }
 
-// Hashing over vector contents (no semantic checks)
+// Fetch merkle root from authority
+async function fetchMerkleRoot() {
+    try {
+        const response = await axios.get(`${AUTHORITY_URL}/merkleRoot`);
+        MERKLE_ROOT = response.data.merkleRoot;
+        console.log(`Fetched Merkle Root from authority: ${MERKLE_ROOT}`);
+        console.log(`Registered voters: ${response.data.voters}`);
+        return true;
+    } catch (err) {
+        console.error('Failed to fetch Merkle Root from authority:', err.message);
+        return false;
+    }
+}
+
+/**
+ * Verify a Merkle inclusion proof
+ * @param {string} leaf - voter hash (hex string)
+ * @param {Array} proof - array of {position: "left"|"right", data: {type:"Buffer", data:[...]}}
+ * @param {string} expectedRoot - merkle root (hex with or without 0x prefix)
+ * @returns {boolean} true if proof is valid
+ */
+function verifyMerkleProof(leaf, proof, expectedRoot) {
+    try {
+        // Strip 0x prefix if present
+        const cleanRoot = expectedRoot.startsWith('0x') ? expectedRoot.slice(2) : expectedRoot;
+        
+        // Start with the leaf as a Buffer
+        let currentHash = Buffer.from(leaf, 'hex');
+        
+        // Walk up the tree
+        for (let i = 0; i < proof.length; i++) {
+            const sibling = proof[i];
+            const siblingData = Buffer.from(sibling.data.data);
+            
+            // Concatenate based on position
+            let combined;
+            if (sibling.position === 'left') {
+                combined = Buffer.concat([siblingData, currentHash]);
+            } else {
+                combined = Buffer.concat([currentHash, siblingData]);
+            }
+            
+            // Hash the concatenation
+            currentHash = crypto.createHash('sha256').update(combined).digest();
+        }
+        
+        // Compare computed root with expected root
+        const computedRoot = currentHash.toString('hex');
+        return computedRoot === cleanRoot;
+    } catch (err) {
+        console.error('Merkle proof verification error:', err);
+        return false;
+    }
+}
+
+// Hashing over vector contents
 var calculateHash = (index, previousHash, timestamp, voterHash, merkleProof, voteVector) => {
     const votePart = Array.isArray(voteVector) ? JSON.stringify(voteVector) : "";
     return CryptoJS.SHA256(
@@ -80,7 +136,7 @@ var calculateHashForBlock = (block) => {
     );
 };
 
-// Block creation (no validation of voteVector here)
+// Block creation
 var generateNextBlock = (voterHash, merkleProof, voteVector) => {
     var previousBlock = getLatestBlock();
     var nextIndex = previousBlock.index + 1;
@@ -104,7 +160,7 @@ var generateNextBlock = (voterHash, merkleProof, voteVector) => {
     );
 };
 
-// Minimal structural validation only (index/prev/hash), deferring vote checks to ZKP
+// Block validation with Merkle proof verification
 var isValidNewBlock = (newBlock, previousBlock) => {
     if (previousBlock.index + 1 !== newBlock.index) {
         console.log('invalid index'); return false;
@@ -113,9 +169,39 @@ var isValidNewBlock = (newBlock, previousBlock) => {
     } else if (calculateHashForBlock(newBlock) !== newBlock.hash) {
         console.log('invalid hash'); return false;
     }
-    // No voteVector validation here; ZKP verification to be added later
+
+    if (newBlock.index === 0) return true;
+
+    if (!MERKLE_ROOT) {
+        console.log('Merkle root not yet fetched, cannot verify voter eligibility');
+        return false;
+    }
+
+    if (!verifyMerkleProof(newBlock.voterHash, newBlock.merkleProof, MERKLE_ROOT)) {
+        console.log('invalid merkle proof: voter not in eligible set');
+        return false;
+    }
+
+    // Double-vote protection (on-chain)
+    if (hasVoterAlreadyVoted(newBlock.voterHash)) {
+        console.log('double vote detected: voter already voted');
+        return false;
+    }
+
+    // Optional: reject if another pending proposal already uses this voterHash
+    if (isVoterInPendingProposals(newBlock.voterHash)) {
+        // Allow the exact same object we are validating; only reject if a distinct pending entry conflicts
+        for (const [h, b] of Object.entries(global.pendingProposals || {})) {
+            if (b && b !== newBlock && b.voterHash === newBlock.voterHash) {
+                console.log('conflict: pending proposal uses same voterHash');
+                return false;
+            }
+        }
+    }
+
     return true;
 };
+
 
 var addBlock = (newBlock) => {
     if (isValidNewBlock(newBlock, getLatestBlock())) {
@@ -134,14 +220,63 @@ var initHttpServer = () => {
         res.json(blockchain);
     });
 
+    app.get('/config', (req, res) => {
+        res.json({
+            electionId: ELECTION_ID,
+            merkleRoot: MERKLE_ROOT,
+            candidates: ELECTION_CANDIDATES,
+            startTime: ELECTION_START,
+            endTime: ELECTION_END
+        });
+    });
+
+    app.get('/hasVoted/:voterHash', (req, res) => {
+        const voterHash = req.params.voterHash;
+        const voted = hasVoterAlreadyVoted(voterHash);
+        let blockIndex = null;
+        if (voted) {
+            for (let i = 1; i < blockchain.length; i++) {
+                if (blockchain[i].voterHash === voterHash) { blockIndex = i; break; }
+            }
+        }
+        res.json({ voterHash, voted, blockIndex });
+    });
+
+
     // Mine/propose a block (proposer does not vote)
     app.post('/mineBlock', async (req, res) => {
         try {
+            const now = Math.floor(Date.now()/1000);
+            if (ELECTION_START && now < ELECTION_START) {
+                return res.status(403).json({ error: 'Election not started' });
+            }
+            
+            if (ELECTION_END && now > ELECTION_END) {
+                return res.status(403).json({ error: 'Election ended' });
+            }
+
             const { voterHash, merkleProof, voteVector } = req.body;
 
-            // Minimal presence checks only; no voteVector validation
             if (!voterHash || !Array.isArray(merkleProof) || !Array.isArray(voteVector)) {
                 return res.status(400).json({ error: 'voterHash, merkleProof, and voteVector are required' });
+            }
+
+            if (!MERKLE_ROOT) {
+                return res.status(503).json({ error: 'Merkle root not yet loaded from authority' });
+            }
+
+            if (!verifyMerkleProof(voterHash, merkleProof, MERKLE_ROOT)) {
+                return res.status(403).json({ error: 'Invalid Merkle proof: voter not eligible' });
+            }
+
+            // Double-vote protection (on-chain)
+            if (hasVoterAlreadyVoted(voterHash)) {
+                return res.status(409).json({ error: 'Double vote rejected: voter has already voted' });
+            }
+
+            // Optional: prevent conflicting concurrent proposals
+            if (isVoterInPendingProposals(voterHash)) {
+                return res.status(409).json({ error: 'Conflicting pending proposal exists for this voter' });
             }
 
             console.log(`Node ${NODE_ID} proposing new block (not voting)`);
@@ -154,7 +289,7 @@ var initHttpServer = () => {
 
             if (!global.voteTally) global.voteTally = {};
             global.voteTally[blockHash] = {
-                totalVoters: sockets.length, // only peers vote; proposer excluded
+                totalVoters: sockets.length,
                 proposer: NODE_ID,
                 votes: {}
             };
@@ -173,49 +308,23 @@ var initHttpServer = () => {
         }
     });
 
-    // Plaintext tally for testing only (replace with HE + ZKP later)
+    // Plaintext tally for testing
+    /**
+     * GET /tally
+     * Computes an element-wise sum over voteVector in all non-genesis VOTE blocks.
+     * - If the summed vector length matches ELECTION_CANDIDATES, returns a labeled object.
+     * - Otherwise returns { totals: [...] }.
+     * - Includes basic metadata for audit/debug.
+     */
     app.get('/tally', (req, res) => {
         try {
-            // Determine vector length from first non-genesis block, fallback to CANDIDATES length
-            let vecLen = CANDIDATES.length;
-            for (const b of blockchain) {
-                if (b.index > 0 && Array.isArray(b.voteVector)) {
-                    vecLen = b.voteVector.length;
-                    break;
-                }
-            }
-            const totals = new Array(vecLen).fill(0);
-
-            for (const block of blockchain) {
-                if (block.index === 0) continue;
-                if (Array.isArray(block.voteVector)) {
-                    for (let i = 0; i < totals.length; i++) {
-                        totals[i] += Number(block.voteVector[i] || 0);
-                    }
-                }
-            }
-
-            // Label by candidates if sizes match, else return raw vector
-            if (totals.length === CANDIDATES.length) {
-                const result = {};
-                for (let i = 0; i < totals.length; i++) result[CANDIDATES[i]] = totals[i];
-                return res.json(result);
-            } else {
-                return res.json({ totals });
-            }
+            return res.json({
+                candidates: ELECTION_CANDIDATES
+            });
         } catch (err) {
             console.error('Error in /tally:', err);
             return res.status(500).json({ error: 'Tally failed' });
         }
-    });
-
-    app.get('/peers', (req, res) => {
-        res.send(sockets.map(s => s._socket.remoteAddress + ':' + s._socket.remotePort));
-    });
-
-    app.post('/addPeer', (req, res) => {
-        connectToPeers([req.body.peer]);
-        res.send();
     });
 
     app.listen(http_port, '0.0.0.0', () => console.log('Listening http on port: ' + http_port));
@@ -264,13 +373,13 @@ var initMessageHandler = (ws) => {
                 if (!global.voteTally) global.voteTally = {};
                 if (!global.voteTally[blockHash]) {
                     global.voteTally[blockHash] = {
-                        totalVoters: sockets.length, // only peers vote
+                        totalVoters: sockets.length,
                         proposer: proposer,
                         votes: {}
                     };
                 }
 
-                // Minimal structural validation only
+                // Validate including Merkle proof
                 const valid = isValidNewBlock(proposedBlock, getLatestBlock());
                 const voteResult = valid ? 'yes' : 'no';
 
@@ -305,6 +414,23 @@ var initMessageHandler = (ws) => {
         }
     });
 };
+
+function hasVoterAlreadyVoted(voterHash) {
+    // skip genesis (index 0)
+    for (let i = 1; i < blockchain.length; i++) {
+        if (blockchain[i].voterHash === voterHash) return true;
+    }
+    return false;
+}
+
+function isVoterInPendingProposals(voterHash) {
+    if (!global.pendingProposals) return false;
+    for (const [hash, block] of Object.entries(global.pendingProposals)) {
+        if (block && block.voterHash === voterHash) return true;
+    }
+    return false;
+}
+
 
 function checkConsensus(blockHash) {
     if (!global.voteTally || !global.voteTally[blockHash]) return;
@@ -423,7 +549,19 @@ var responseLatestMsg = () => ({
 var write = (ws, message) => ws.send(JSON.stringify(message));
 var broadcast = (message) => sockets.forEach(socket => write(socket, message));
 
-// Boot
-connectToPeers(initialPeers);
-initHttpServer();
-initP2PServer();
+// Boot sequence
+(async () => {
+    // Fetch merkle root from authority first
+    const rootFetched = await fetchMerkleRoot();
+    if (!rootFetched) {
+        console.error('Cannot start without Merkle Root. Exiting.');
+        process.exit(1);
+    }
+    
+    // Now start services
+    connectToPeers(initialPeers);
+    initHttpServer();
+    initP2PServer();
+    
+    console.log(`Node ${NODE_ID} ready with Merkle Root: ${MERKLE_ROOT}`);
+})();

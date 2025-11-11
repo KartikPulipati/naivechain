@@ -5,17 +5,27 @@ services:
       - "4000:4000"
     networks:
       - blockchain
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:4000/merkleRoot"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
 
   node1:
     build: ./blockchain
     ports:
       - "3001:3001"
       - "6001:6001"
+    env_file: ./election.env
     environment:
       - NODE_ID=3001
       - HTTP_PORT=3001
       - P2P_PORT=6001
       - PEERS=ws://node2:6001,ws://node3:6001
+    depends_on:
+      authority:
+        condition: service_healthy
     networks:
       - blockchain
 
@@ -24,11 +34,15 @@ services:
     ports:
       - "3002:3001"
       - "6002:6001"
+    env_file: ./election.env
     environment:
       - NODE_ID=3002
       - HTTP_PORT=3001
       - P2P_PORT=6001
       - PEERS=ws://node1:6001,ws://node3:6001
+    depends_on:
+      authority:
+        condition: service_healthy
     networks:
       - blockchain
 
@@ -37,11 +51,15 @@ services:
     ports:
       - "3003:3001"
       - "6003:6001"
+    env_file: ./election.env
     environment:
       - NODE_ID=3003
       - HTTP_PORT=3001
       - P2P_PORT=6001
       - PEERS=ws://node1:6001,ws://node2:6001
+    depends_on:
+      authority:
+        condition: service_healthy
     networks:
       - blockchain
 
