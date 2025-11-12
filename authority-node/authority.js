@@ -64,3 +64,38 @@ app.listen(4000, () => {
   console.log(`Merkle Root: ${merkleRoot}`);
   console.log(`Registered ${voterIDs.length} voters`);
 });
+
+// Homomorphic Encryption setup
+const { generateRandomKeys } = require('paillier-bigint');
+
+// Generate keypair at boot
+let HE = null;
+(async () => {
+  HE = await generateRandomKeys(2048); // { publicKey: {n,g}, privateKey }
+  console.log('HE public key ready');
+})();
+
+// Publish public key
+app.get('/hePublicKey', (req, res) => {
+  if (!HE) return res.status(503).json({ error: 'HE key not ready' });
+  res.json({
+    n: HE.publicKey.n.toString(16),
+    g: HE.publicKey.g.toString(16),
+    scheme: 'paillier-2048'
+  });
+});
+
+// for demo purposes: decrypt totals
+app.post('/heDecryptTotals', async (req, res) => {
+  try {
+    const { totals } = req.body; // array of hex ciphertexts
+    if (!HE) return res.status(503).json({ error: 'HE key not ready' });
+    const dec = totals.map(hex => {
+      const c = BigInt('0x' + hex.replace(/^0x/, ''));
+      return Number(HE.privateKey.decrypt(c));
+    });
+    res.json({ plaintext: dec });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});

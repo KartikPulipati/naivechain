@@ -12,6 +12,7 @@
     "express": "~4.11.1",
     "merkletreejs": "^0.6.0",
     "node-fetch": "^2.7.0",
+    "paillier-bigint": "^3.4.3",
     "ws": "^1.1.0"
   },
   "engines": {
