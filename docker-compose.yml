@@ -13,6 +13,19 @@ services:
       retries: 20        # allow time for keygen
       start_period: 30s  # Paillier keygen can take seconds
 
+  zk-service:
+      build: ./zk-service
+      ports:
+        - "5000:5000"
+      networks:
+        - blockchain
+      healthcheck:
+        test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5000/bitVerify"]
+        interval: 5s
+        timeout: 3s
+        retries: 5
+        start_period: 10s
+  
   node1:
     build: ./blockchain
     ports:

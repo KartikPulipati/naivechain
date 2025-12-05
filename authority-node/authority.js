@@ -8,7 +8,8 @@ const voterIDs = [
   'VOTER001',
   'VOTER002',
   'VOTER003',
-  'VOTER004'
+  'VOTER004',
+  'VOTER005',
 ];
 
 // Hash function using Node's crypto (same as blockchain)

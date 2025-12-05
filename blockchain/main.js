@@ -18,8 +18,9 @@ const ELECTION_CANDIDATES = process.env.ELECTION_CANDIDATES ? JSON.parse(process
 const ELECTION_START = process.env.ELECTION_START ? parseInt(process.env.ELECTION_START, 10) : null;
 const ELECTION_END = process.env.ELECTION_END ? parseInt(process.env.ELECTION_END, 10) : null;
 
+const ZK_URL = process.env.ZK_SERVICE_URL || 'http://zk-service:5000';
+
 const { PublicKey } = require('paillier-bigint');
-let TOTAL_VOTES = 0;
 let HE_PUB = null;
 let N2 = null;
 let ENC_TOTALS = null;
@@ -36,9 +37,10 @@ var MessageType = {
     NETWORK_VOTE: 4
 };
 
-// Block structure with dummy proof fields
 class Block {
-    constructor(index, previousHash, timestamp, voterHash, merkleProof, voteVector, hash, blockType = 'VOTE', config = null, encryptedVoteVector = null, encOne = null, binaryProofs = null) {
+    constructor(index, previousHash, timestamp, voterHash, merkleProof, voteVector, hash, 
+                blockType = 'VOTE', 
+                encryptedVoteVector = null, bitProofs = null, sumProof = null) {
         this.index = index;
         this.previousHash = previousHash.toString();
         this.timestamp = timestamp;
@@ -46,10 +48,9 @@ class Block {
         this.merkleProof = merkleProof;
         this.voteVector = voteVector;
         this.encryptedVoteVector = encryptedVoteVector;
-        this.encOne = encOne;                    // encrypted 1 (dummy proof field)
-        this.binaryProofs = binaryProofs;        // array of dummy proof objects
+        this.bitProofs = bitProofs;                   
+        this.sumProof = sumProof;                       
         this.blockType = blockType;
-        this.config = config;
         this.hash = hash.toString();
     }
 }
@@ -60,19 +61,31 @@ var blockchain = [getGenesisBlock()];
 
 function getGenesisBlock() {
     return new Block(
-        0,
-        "0",
-        1465154705,
-        "genesisVoterHash",
-        [],
-        [],
+        0, "0", 1465154705, "genesisVoterHash", [], [],
         "816534932c2b7154836da6afc367695e6337db8a921823784c14378abed4f7d7",
-        "VOTE",
-        null,
-        null,
-        null,
-        null
+        "VOTE", null, null, null
     );
+}
+
+// Verify combined proofs (bit + sum) via zk-service
+async function verifyVoteProofs(HE_PUB, encryptedVoteVector, bitProofs, sumProof) {
+    if (!HE_PUB || !HE_PUB.n) {
+        console.log('HE_PUB not ready');
+        return false;
+    }
+    try {
+        const res = await axios.post(`${ZK_URL}/verifyVote`, {
+            n: '0x' + HE_PUB.n.toString(16),
+            encrypted_vote_vector: encryptedVoteVector,
+            bit_proofs: bitProofs,
+            sum_proof: sumProof
+        }, { timeout: 5000 });
+        console.log('✅ ZK verification:', res.data.details);
+        return res.data.valid;
+    } catch (err) {
+        console.error('ZK verification failed:', err.message);
+        return false;
+    }
 }
 
 // Fetch merkle root from authority
@@ -136,201 +149,104 @@ function verifyMerkleProof(leaf, proof, expectedRoot) {
     }
 }
 
-// One-hot vector check
-function isOneHot(vec) {
-    if (!Array.isArray(vec) || vec.length < 1) return false;
-    let sum = 0;
-    for (const v of vec) {
-        const x = Number(v);
-        if (!(x === 0 || x === 1)) return false;
-        sum += x;
-    }
-    return sum === 1;
+// Hashing over vector contents
+function calculateHash(index, previousHash, timestamp, voterHash, merkleProof, voteVector, blockType, 
+                      encryptedVoteVector, bitProofs, sumProof) {
+    const proofStr = JSON.stringify(serializeProof(merkleProof));
+    const voteStr = JSON.stringify(voteVector || null);
+    const encVoteStr = JSON.stringify(serializeHexArray(encryptedVoteVector));
+    const bitProofsStr = JSON.stringify(bitProofs || null);
+    const sumProofStr = JSON.stringify(sumProof || null);
+    
+    return crypto
+        .createHash('sha256')
+        .update(index + previousHash + timestamp + voterHash + proofStr + voteStr + blockType + encVoteStr + bitProofsStr + sumProofStr)
+        .digest('hex');
 }
-
-// Paillier helpers
-function modPow(base, exp, mod) {
-    let result = 1n, b = base % mod, e = exp;
-    while (e > 0n) {
-        if (e & 1n) result = (result * b) % mod;
-        b = (b * b) % mod;
-        e >>= 1n;
-    }
-    return result;
-}
-
-function cryptoRand(n) {
-    let bits = n.toString(2).length;
-    let bytes = Math.ceil(bits / 8);
-    while (true) {
-        let buf = crypto.randomBytes(bytes);
-        let val = BigInt('0x' + buf.toString('hex'));
-        if (val < n && val > 1n) return val;
-    }
-}
-
-function paillierEncrypt(pub, plaintext) {
-    const n = pub.n, n2 = pub.n2 || (pub.n * pub.n), g = pub.g;
-    const r = cryptoRand(n);
-    const c = (modPow(g, plaintext, n2) * modPow(r, n, n2)) % n2;
-    return c;
-}
-
-// Encrypt vote vector using Paillier HE
-function encryptVectorPaillier(vec) {
-    if (!HE_PUB) throw new Error('HE public key not loaded');
-    return vec.map(v => {
-        const m = BigInt(Number(v));
-        const c = paillierEncrypt(HE_PUB, m);
-        return '0x' + c.toString(16);
-    });
-}
-
-// Generate dummy proofs (all zeros, always pass)
-function generateDummyProofs(length) {
-    const proofs = [];
-    for (let i = 0; i < length; i++) {
-        proofs.push({
-            A0: '0x0',
-            A1: '0x0',
-            e0: '0',
-            e1: '0',
-            z0: '0',
-            z1: '0'
-        });
-    }
-    return proofs;
-}
-
-// Hashing over vector contents (updated to include encOne and binaryProofs)
-var calculateHash = (index, previousHash, timestamp, voterHash, merkleProof, voteVector, blockType = 'VOTE', config = null, encryptedVoteVector = null, encOne = null, binaryProofs = null) => {
-    const votePart = Array.isArray(voteVector) ? JSON.stringify(voteVector) : "";
-    const encPart = Array.isArray(encryptedVoteVector) ? JSON.stringify(encryptedVoteVector) : "";
-    const encOnePart = encOne || "";
-    const proofsPart = Array.isArray(binaryProofs) ? JSON.stringify(binaryProofs) : "";
-    const typePart = blockType || 'VOTE';
-    const configPart = config ? JSON.stringify(config) : "";
-    return CryptoJS.SHA256(
-        index + previousHash + timestamp + voterHash + JSON.stringify(merkleProof) + votePart + encPart + encOnePart + proofsPart + typePart + configPart
-    ).toString();
-};
 
 var calculateHashForBlock = (block) => {
     return calculateHash(
-        block.index,
-        block.previousHash,
-        block.timestamp,
-        block.voterHash || "",
-        block.merkleProof || [],
-        block.voteVector || null,
-        block.blockType || 'VOTE',
-        block.config || null,
-        block.encryptedVoteVector || null,
-        block.encOne || null,
-        block.binaryProofs || null
+        block.index, block.previousHash, block.timestamp, block.voterHash || "",
+        block.merkleProof || [], block.voteVector || null, block.blockType || 'VOTE',
+        block.encryptedVoteVector || null, block.bitProofs || null, block.sumProof || null
     );
 };
 
 // Block creation
-var generateNextBlock = (voterHash, merkleProof, voteVector, encryptedVoteVector, encOne, binaryProofs) => {
+var generateNextBlock = (voterHash, merkleProof, voteVector, encryptedVoteVector, bitProofs, sumProof) => {
     var previousBlock = getLatestBlock();
     var nextIndex = previousBlock.index + 1;
     var nextTimestamp = Math.floor(Date.now() / 1000);
     var nextHash = calculateHash(
-        nextIndex,
-        previousBlock.hash,
-        nextTimestamp,
-        voterHash,
-        merkleProof,
-        voteVector,
-        'VOTE',
-        null,
-        encryptedVoteVector,
-        encOne,
-        binaryProofs
+        nextIndex, previousBlock.hash, nextTimestamp, voterHash,
+        merkleProof, voteVector, 'VOTE',
+        encryptedVoteVector, bitProofs, sumProof
     );
     return new Block(
-        nextIndex,
-        previousBlock.hash,
-        nextTimestamp,
-        voterHash,
-        merkleProof,
-        voteVector,
-        nextHash,
-        'VOTE',
-        null,
-        encryptedVoteVector,
-        encOne,
-        binaryProofs
+        nextIndex, previousBlock.hash, nextTimestamp, voterHash,
+        merkleProof, voteVector, nextHash, 'VOTE',
+        encryptedVoteVector, bitProofs, sumProof
     );
 };
 
-// Block validation with DUMMY proof verification (always passes)
-var isValidNewBlock = (newBlock, previousBlock) => {
-    if (previousBlock.index + 1 !== newBlock.index) { 
-        console.log('invalid index'); 
-        return false; 
+function serializeProof(proof) {
+    if (!proof || !Array.isArray(proof)) return proof;
+    return proof.map(p => ({
+        position: p.position,
+        data: Buffer.isBuffer(p.data) ? p.data.toString('hex') : p.data
+    }));
+}
+
+function serializeHexArray(arr) {
+    if (!arr) return null;
+    if (typeof arr === 'string') return arr;
+    if (Array.isArray(arr)) return arr.map(item => String(item));
+    return null;
+}
+
+// Block validation
+var isValidNewBlock = async (newBlock, previousBlock) => {
+    if (previousBlock.index + 1 !== newBlock.index) return false;
+    if (previousBlock.hash !== newBlock.previousHash) return false;
+    if (calculateHashForBlock(newBlock) !== newBlock.hash) return false;
+
+    if (newBlock.blockType && newBlock.blockType !== 'VOTE') return true;
+
+    // VOTE block validation
+    if (!MERKLE_ROOT) return false;
+    if (!verifyMerkleProof(newBlock.voterHash, newBlock.merkleProof, MERKLE_ROOT)) return false;
+    if (hasVoterAlreadyVoted(newBlock.voterHash)) return false;
+    if (isVoterInPendingProposals(newBlock.voterHash)) return false;
+
+    if (!ensureN2()) return false;
+
+    const expectedLength = ELECTION_CANDIDATES.length + 1;
+    if (!Array.isArray(newBlock.encryptedVoteVector) || newBlock.encryptedVoteVector.length !== expectedLength) {
+        console.log(`❌ encryptedVoteVector length: expected ${expectedLength}, got ${newBlock.encryptedVoteVector?.length || 0}`);
+        return false;
     }
-    if (previousBlock.hash !== newBlock.previousHash) { 
-        console.log('invalid previoushash'); 
-        return false; 
+    if (!Array.isArray(newBlock.bitProofs) || newBlock.bitProofs.length !== expectedLength) {
+        console.log(`❌ bitProofs length: expected ${expectedLength}, got ${newBlock.bitProofs?.length || 0}`);
+        return false;
     }
-    if (calculateHashForBlock(newBlock) !== newBlock.hash) { 
-        console.log('invalid hash'); 
-        return false; 
+    if (!newBlock.sumProof) {
+        console.log('❌ missing sumProof');
+        return false;
     }
 
-    if (newBlock.blockType && newBlock.blockType !== 'VOTE') {
-        return true;
+    // ✅ Single ZK service call verifies everything
+    const zkValid = await verifyVoteProofs(
+        HE_PUB,
+        newBlock.encryptedVoteVector,
+        newBlock.bitProofs,
+        newBlock.sumProof
+    );
+    if (!zkValid) {
+        console.log('❌ ZK proofs failed');
+        return false;
     }
 
-    // VOTE block rules
-    if (!MERKLE_ROOT) { 
-        console.log('no merkle root'); 
-        return false; 
-    }
-    if (!Array.isArray(newBlock.encryptedVoteVector) || newBlock.encryptedVoteVector.length < 1) {
-        console.log('missing encryptedVoteVector'); 
-        return false;
-    }
-    if (newBlock.voteVector && newBlock.voteVector.length) {
-        console.log('plaintext voteVector should not be present in proposed block'); 
-        return false;
-    }
-    if (!verifyMerkleProof(newBlock.voterHash, newBlock.merkleProof, MERKLE_ROOT)) {
-        console.log('invalid merkle proof'); 
-        return false;
-    }
-    if (hasVoterAlreadyVoted(newBlock.voterHash)) {
-        console.log('double vote detected'); 
-        return false;
-    }
-    for (const [h, b] of Object.entries(global.pendingProposals || {})) {
-        if (b && b !== newBlock && b.voterHash === newBlock.voterHash) {
-            console.log('conflict with pending proposal'); 
-            return false;
-        }
-    }
-
-    // DUMMY PROOF VERIFICATION - commented out so it always passes
-    /*
-    if (!ensureN2()) {
-        console.log('HE not ready for proof verification');
-        return false;
-    }
-    if (!Array.isArray(newBlock.binaryProofs) || newBlock.binaryProofs.length !== newBlock.encryptedVoteVector.length) {
-        console.log('binaryProofs length mismatch');
-        return false;
-    }
-    for (let i = 0; i < newBlock.encryptedVoteVector.length; i++) {
-        // Real proof verification would go here
-        // if (!paillierBitSigmaVerify(newBlock.encryptedVoteVector[i], newBlock.binaryProofs[i], HE_PUB.n, HE_PUB.g, N2)) {
-        //     console.log('bit proof failed', i);
-        //     return false;
-        // }
-    }
-    */
-
+    console.log(`✅ Valid n+1 vote: ${expectedLength} encrypted bits + proofs`);
     return true;
 };
 
@@ -376,63 +292,55 @@ var initHttpServer = () => {
         res.json({ voterHash, voted, blockIndex });
     });
 
-    // Mine/propose a block with DUMMY proofs
     app.post('/mineBlock', async (req, res) => {
         try {
-            const { voterHash, merkleProof, voteVector } = req.body;
+            const { voterHash, merkleProof, encryptedVoteVector, bitProofs, sumProof } = req.body;
 
-            if (!voterHash || !Array.isArray(merkleProof) || !Array.isArray(voteVector)) {
-                return res.status(400).json({ error: 'voterHash, merkleProof, and voteVector are required' });
+            // Basic validation
+            if (!voterHash || !Array.isArray(merkleProof) || !Array.isArray(encryptedVoteVector)) {
+                return res.status(400).json({ error: 'Required fields missing' });
             }
-            if (!MERKLE_ROOT) {
-                return res.status(503).json({ error: 'Merkle root not yet loaded from authority' });
-            }
+            if (!MERKLE_ROOT) return res.status(503).json({ error: 'Merkle root not loaded' });
             if (!verifyMerkleProof(voterHash, merkleProof, MERKLE_ROOT)) {
-                return res.status(403).json({ error: 'Invalid Merkle proof: voter not eligible' });
-            }
-            if (!isOneHot(voteVector)) {
-                return res.status(400).json({ error: 'Invalid vote: not one-hot' });
+                return res.status(403).json({ error: 'Invalid Merkle proof' });
             }
             if (hasVoterAlreadyVoted(voterHash)) {
-                return res.status(409).json({ error: 'Double vote rejected: voter has already voted' });
+                return res.status(409).json({ error: 'Double vote rejected' });
             }
             if (isVoterInPendingProposals(voterHash)) {
-                return res.status(409).json({ error: 'Conflicting pending proposal exists for this voter' });
+                return res.status(409).json({ error: 'Conflicting proposal' });
             }
-            if (!HE_PUB) {
-                return res.status(503).json({ error: 'HE public key not loaded' });
+            if (!HE_PUB) return res.status(503).json({ error: 'HE key not loaded' });
+
+            const expectedLength = ELECTION_CANDIDATES.length + 1;
+            if (encryptedVoteVector.length !== expectedLength) {
+                return res.status(400).json({ error: `encryptedVoteVector must be length ${expectedLength}` });
+            }
+            if (!Array.isArray(bitProofs) || bitProofs.length !== expectedLength) {
+                return res.status(400).json({ error: `bitProofs must be length ${expectedLength}` });
+            }
+            if (!sumProof) {
+                return res.status(400).json({ error: 'sumProof required' });
             }
 
-            // Encrypt vector
-            const encryptedVoteVector = encryptVectorPaillier(voteVector);
+            console.log('📦 n+1 vote block:', {
+                voterHash: voterHash.slice(0,16)+'...',
+                encryptedVoteVector: `${encryptedVoteVector.length} ciphertexts`,
+                bitProofs: bitProofs.length,
+                sumProof: typeof sumProof
+            });
 
-            // Encrypt 1 for encOne (dummy proof field)
-            const encOne = '0x' + paillierEncrypt(HE_PUB, 1n).toString(16);
-
-            // Generate DUMMY proofs (all zeros)
-            const binaryProofs = generateDummyProofs(voteVector.length);
-
-            // Build proposed block
             const newBlock = generateNextBlock(
-                voterHash,
-                merkleProof,
-                null,  // no plaintext in proposed block
-                encryptedVoteVector,
-                encOne,
-                binaryProofs
+                voterHash, merkleProof, null,
+                encryptedVoteVector, bitProofs, sumProof
             );
 
-            // Consensus proposal
+            // Consensus proposal (UNCHANGED)
             const blockHash = newBlock.hash;
             if (!global.pendingProposals) global.pendingProposals = {};
             global.pendingProposals[blockHash] = newBlock;
-
             if (!global.voteTally) global.voteTally = {};
-            global.voteTally[blockHash] = {
-                totalVoters: sockets.length,
-                proposer: NODE_ID,
-                votes: {}
-            };
+            global.voteTally[blockHash] = { totalVoters: sockets.length, proposer: NODE_ID, votes: {} };
 
             broadcast({
                 type: MessageType.PROPOSE_BLOCK,
@@ -476,9 +384,9 @@ var initConnection = (ws) => {
 };
 
 var initMessageHandler = (ws) => {
-    ws.on('message', (data) => {
+    ws.on('message', async (data) => {
         var message = JSON.parse(data);
-        console.log('Received message' + JSON.stringify(message));
+        // console.log('Received message' + JSON.stringify(message));
         switch (message.type) {
             case MessageType.QUERY_LATEST:
                 write(ws, responseLatestMsg());
@@ -487,7 +395,7 @@ var initMessageHandler = (ws) => {
                 write(ws, responseChainMsg());
                 break;
             case MessageType.RESPONSE_BLOCKCHAIN:
-                handleBlockchainResponse(message);
+                await handleBlockchainResponse(message);
                 break;
             case MessageType.PROPOSE_BLOCK: {
                 const proposalData = JSON.parse(message.data);
@@ -510,7 +418,7 @@ var initMessageHandler = (ws) => {
                     };
                 }
 
-                const valid = isValidNewBlock(proposedBlock, getLatestBlock());
+                const valid = await isValidNewBlock(proposedBlock, getLatestBlock());
                 const voteResult = valid ? 'yes' : 'no';
 
                 console.log(`Node ${nodeId} voted ${voteResult} for block ${proposedBlock.index}`);
@@ -640,7 +548,6 @@ function checkConsensus(blockHash) {
                     console.error('Encrypted totals update skipped:', e.message); 
                 }
             }
-            TOTAL_VOTES += 1;
         }
         broadcast(responseLatestMsg());
     } else {
@@ -670,7 +577,7 @@ var connectToPeers = (newPeers) => {
     });
 };
 
-var handleBlockchainResponse = (message) => {
+var handleBlockchainResponse = async (message) => {
     var receivedBlocks = JSON.parse(message.data).sort((b1, b2) => (b1.index - b2.index));
     var latestBlockReceived = receivedBlocks[receivedBlocks.length - 1];
     var latestBlockHeld = getLatestBlock();
@@ -685,15 +592,15 @@ var handleBlockchainResponse = (message) => {
             broadcast(queryAllMsg());
         } else {
             console.log("Received blockchain is longer than current blockchain");
-            replaceChain(receivedBlocks);
+            await replaceChain(receivedBlocks);
         }
     } else {
         console.log('received blockchain is not longer than current blockchain. Do nothing');
     }
 };
 
-var replaceChain = (newBlocks) => {
-    if (isValidChain(newBlocks) && newBlocks.length > blockchain.length) {
+var replaceChain = async (newBlocks) => {
+    if (await isValidChain(newBlocks) && newBlocks.length > blockchain.length) {
         blockchain = newBlocks;
         try { 
             recomputeEncryptedTotalsFromChain(); 
@@ -706,17 +613,17 @@ var replaceChain = (newBlocks) => {
     }
 };
 
-var isValidChain = (blockchainToValidate) => {
+var isValidChain = async (blockchainToValidate) => {
     if (JSON.stringify(blockchainToValidate[0]) !== JSON.stringify(getGenesisBlock())) {
         return false;
     }
     var tempBlocks = [blockchainToValidate[0]];
     for (var i = 1; i < blockchainToValidate.length; i++) {
-        if (isValidNewBlock(blockchainToValidate[i], tempBlocks[i - 1])) {
-            tempBlocks.push(blockchainToValidate[i]);
-        } else {
+        const isValidBlock = await isValidNewBlock(blockchainToValidate[i], tempBlocks[i - 1]);
+        if (!isValidBlock) {
             return false;
         }
+        tempBlocks.push(blockchainToValidate[i]);
     }
     return true;
 };
