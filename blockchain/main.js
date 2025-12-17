@@ -12,6 +12,7 @@ var p2p_port = process.env.P2P_PORT || 6001;
 var initialPeers = process.env.PEERS ? process.env.PEERS.split(',') : [];
 const NODE_ID = process.env.NODE_ID || process.env.HTTP_PORT || 'unknown';
 const AUTHORITY_URL = process.env.AUTHORITY_URL || 'http://authority:4000';
+const TOTAL_NODES = parseInt(process.env.TOTAL_NODES || '3', 10);  // ✅ Add this
 
 const ELECTION_ID = process.env.ELECTION_ID || 'POC-DEFAULT';
 const ELECTION_CANDIDATES = process.env.ELECTION_CANDIDATES ? JSON.parse(process.env.ELECTION_CANDIDATES) : ["candidateA","candidateB","candidateC"];
@@ -74,8 +75,7 @@ async function verifyVoteProofs(HE_PUB, encryptedVoteVector, bitProofs, sumProof
         return false;
     }
     try {
-        const res = await axios.post(`${ZK_URL}/verifyVote`, {
-            n: '0x' + HE_PUB.n.toString(16),
+        const res = await axios.post(`${ZK_URL}/verify_vote`, {
             encrypted_vote_vector: encryptedVoteVector,
             bit_proofs: bitProofs,
             sum_proof: sumProof
@@ -87,6 +87,7 @@ async function verifyVoteProofs(HE_PUB, encryptedVoteVector, bitProofs, sumProof
         return false;
     }
 }
+
 
 // Fetch merkle root from authority
 async function fetchMerkleRoot() {
@@ -206,27 +207,49 @@ function serializeHexArray(arr) {
 
 // Block validation
 var isValidNewBlock = async (newBlock, previousBlock) => {
-    if (previousBlock.index + 1 !== newBlock.index) return false;
-    if (previousBlock.hash !== newBlock.previousHash) return false;
-    if (calculateHashForBlock(newBlock) !== newBlock.hash) return false;
+    if (previousBlock.index + 1 !== newBlock.index) {
+        console.log('❌ invalid index', { expected: previousBlock.index + 1, got: newBlock.index });
+        return false;
+    }
+    if (previousBlock.hash !== newBlock.previousHash) {
+        console.log('❌ invalid previousHash', { expected: previousBlock.hash, got: newBlock.previousHash });
+        return false;
+    }
+    if (calculateHashForBlock(newBlock) !== newBlock.hash) {
+        console.log('❌ invalid block hash');
+        return false;
+    }
 
     if (newBlock.blockType && newBlock.blockType !== 'VOTE') return true;
 
-    // VOTE block validation
-    if (!MERKLE_ROOT) return false;
-    if (!verifyMerkleProof(newBlock.voterHash, newBlock.merkleProof, MERKLE_ROOT)) return false;
-    if (hasVoterAlreadyVoted(newBlock.voterHash)) return false;
-    if (isVoterInPendingProposals(newBlock.voterHash)) return false;
-
-    if (!ensureN2()) return false;
-
-    const expectedLength = ELECTION_CANDIDATES.length + 1;
-    if (!Array.isArray(newBlock.encryptedVoteVector) || newBlock.encryptedVoteVector.length !== expectedLength) {
-        console.log(`❌ encryptedVoteVector length: expected ${expectedLength}, got ${newBlock.encryptedVoteVector?.length || 0}`);
+    if (!MERKLE_ROOT) {
+        console.log('❌ MERKLE_ROOT missing');
         return false;
     }
-    if (!Array.isArray(newBlock.bitProofs) || newBlock.bitProofs.length !== expectedLength) {
-        console.log(`❌ bitProofs length: expected ${expectedLength}, got ${newBlock.bitProofs?.length || 0}`);
+    if (!verifyMerkleProof(newBlock.voterHash, newBlock.merkleProof, MERKLE_ROOT)) {
+        console.log('❌ invalid Merkle proof');
+        return false;
+    }
+    if (hasVoterAlreadyVoted(newBlock.voterHash)) {
+        console.log('❌ double vote');
+        return false;
+    }
+    if (isVoterInPendingProposals(newBlock.voterHash, newBlock.hash)) {
+        console.log('❌ conflicting proposal');
+        return false;
+    }
+
+    if (!ensureN2()) {
+        console.log('❌ N2 not ready');
+        return false;
+    }
+
+    if (!Array.isArray(newBlock.encryptedVoteVector) || newBlock.encryptedVoteVector.length !== ELECTION_CANDIDATES.length) {
+        console.log(`❌ encryptedVoteVector length: expected ${ELECTION_CANDIDATES.length}, got ${newBlock.encryptedVoteVector?.length || 0}`);
+        return false;
+    }
+    if (!Array.isArray(newBlock.bitProofs) || newBlock.bitProofs.length !== ELECTION_CANDIDATES.length) {
+        console.log(`❌ bitProofs length: expected ${ELECTION_CANDIDATES.length}, got ${newBlock.bitProofs?.length || 0}`);
         return false;
     }
     if (!newBlock.sumProof) {
@@ -234,7 +257,6 @@ var isValidNewBlock = async (newBlock, previousBlock) => {
         return false;
     }
 
-    // ✅ Single ZK service call verifies everything
     const zkValid = await verifyVoteProofs(
         HE_PUB,
         newBlock.encryptedVoteVector,
@@ -242,11 +264,11 @@ var isValidNewBlock = async (newBlock, previousBlock) => {
         newBlock.sumProof
     );
     if (!zkValid) {
-        console.log('❌ ZK proofs failed');
+        console.log('❌ ZK proofs failed in isValidNewBlock');
         return false;
     }
 
-    console.log(`✅ Valid n+1 vote: ${expectedLength} encrypted bits + proofs`);
+    console.log(`✅ Valid vote: ${ELECTION_CANDIDATES.length} encrypted bits + proofs and sum proof verified`);
     return true;
 };
 
@@ -307,23 +329,22 @@ var initHttpServer = () => {
             if (hasVoterAlreadyVoted(voterHash)) {
                 return res.status(409).json({ error: 'Double vote rejected' });
             }
-            if (isVoterInPendingProposals(voterHash)) {
+            if (isVoterInPendingProposals(voterHash, null)) {
                 return res.status(409).json({ error: 'Conflicting proposal' });
             }
             if (!HE_PUB) return res.status(503).json({ error: 'HE key not loaded' });
 
-            const expectedLength = ELECTION_CANDIDATES.length + 1;
-            if (encryptedVoteVector.length !== expectedLength) {
-                return res.status(400).json({ error: `encryptedVoteVector must be length ${expectedLength}` });
+            if (encryptedVoteVector.length !== ELECTION_CANDIDATES.length) {
+                return res.status(400).json({ error: `encryptedVoteVector must be length ${ELECTION_CANDIDATES.length}` });
             }
-            if (!Array.isArray(bitProofs) || bitProofs.length !== expectedLength) {
-                return res.status(400).json({ error: `bitProofs must be length ${expectedLength}` });
+            if (!Array.isArray(bitProofs) || bitProofs.length !== ELECTION_CANDIDATES.length) {
+                return res.status(400).json({ error: `bitProofs must be length ${ELECTION_CANDIDATES.length}` });
             }
             if (!sumProof) {
                 return res.status(400).json({ error: 'sumProof required' });
             }
 
-            console.log('📦 n+1 vote block:', {
+            console.log('📦 Vote block:', {
                 voterHash: voterHash.slice(0,16)+'...',
                 encryptedVoteVector: `${encryptedVoteVector.length} ciphertexts`,
                 bitProofs: bitProofs.length,
@@ -340,7 +361,7 @@ var initHttpServer = () => {
             if (!global.pendingProposals) global.pendingProposals = {};
             global.pendingProposals[blockHash] = newBlock;
             if (!global.voteTally) global.voteTally = {};
-            global.voteTally[blockHash] = { totalVoters: sockets.length, proposer: NODE_ID, votes: {} };
+            global.voteTally[blockHash] = { totalVoters: TOTAL_NODES, proposer: NODE_ID, votes: {} };
 
             broadcast({
                 type: MessageType.PROPOSE_BLOCK,
@@ -356,15 +377,22 @@ var initHttpServer = () => {
 
     app.get('/tallyEncrypted', (req, res) => {
         try {
-            if (!HE_PUB || !N2) return res.status(503).json({ error: 'HE public key not loaded' });
-            if (!ENC_TOTALS) return res.json({ totals: [], n2: '0x' + N2.toString(16) });
-            const hexTotals = ENC_TOTALS.map(bigIntToHex);
+            if (!HE_PUB || !N2) {
+                return res.status(503).json({ error: 'HE public key not loaded' });
+            }
+            
+            if (!ENC_TOTALS || ENC_TOTALS.length === 0) {
+                return res.json({ totals: [], n2: '0x' + N2.toString(16) });
+            }
+            
+            const hexTotals = ENC_TOTALS.map(c => '0x' + c.toString(16));
             return res.json({ totals: hexTotals, n2: '0x' + N2.toString(16) });
         } catch (e) {
             console.error('Error in /tallyEncrypted:', e);
-            return res.status(500).json({ error: 'Encrypted tally failed' });
+            return res.status(500).json({ error: e.message });
         }
     });
+
 
     app.listen(http_port, '0.0.0.0', () => console.log('Listening http on port: ' + http_port));
 };
@@ -460,10 +488,12 @@ function hasVoterAlreadyVoted(voterHash) {
     return false;
 }
 
-function isVoterInPendingProposals(voterHash) {
+function isVoterInPendingProposals(voterHash, currentBlockHash) {
     if (!global.pendingProposals) return false;
     for (const [hash, block] of Object.entries(global.pendingProposals)) {
-        if (block && block.voterHash === voterHash) return true;
+        if (!block) continue;
+        if (hash === currentBlockHash) continue; // skip the proposal under validation
+        if (block.voterHash === voterHash) return true;
     }
     return false;
 }
@@ -477,8 +507,14 @@ function bigIntToHex(x) {
 }
 
 function ensureTotalsLength(len) {
-    if (!ENC_TOTALS || ENC_TOTALS.length !== len) {
-        ENC_TOTALS = new Array(len).fill(1n);
+    if (!ENC_TOTALS) {
+        ENC_TOTALS = new Array(len).fill(1n);  // Initial Enc(0) for all
+        console.log(`Initialized ENC_TOTALS[${len}] = Enc(0)`);
+    }
+    
+    // Truncate if too long (rare)
+    if (ENC_TOTALS.length > len) {
+        ENC_TOTALS.length = len;
     }
 }
 
@@ -493,27 +529,41 @@ function ensureN2() {
 }
 
 function applyEncryptedVectorToTotals(encVecHex) {
-    if (!ensureN2()) { throw new Error('N2 not initialized'); }
+    console.log(`📦 Applying vote vector: ${encVecHex.map(h => h.slice(0,10)).join(',')}`);
+    
+    if (!ensureN2()) throw new Error('N2 not initialized');
     const len = encVecHex.length;
     ensureTotalsLength(len);
+    
     for (let i = 0; i < len; i++) {
         const c = hexToBigInt(encVecHex[i]);
+        console.log(`Before: ENC_TOTALS[${i}]=${ENC_TOTALS[i].toString(16).slice(0,10)}...`);
         ENC_TOTALS[i] = (ENC_TOTALS[i] * c) % N2;
+        console.log(`After:  ENC_TOTALS[${i}]=${ENC_TOTALS[i].toString(16).slice(0,10)}...`);
     }
 }
 
 function recomputeEncryptedTotalsFromChain() {
     if (!ensureN2()) { throw new Error('N2 not initialized'); }
-    ENC_TOTALS = null;
+    
+    // ✅ Initialize only if missing
+    if (!ENC_TOTALS) {
+        ENC_TOTALS = new Array(ELECTION_CANDIDATES.length).fill(1n);
+        console.log(`✅ Initialized ENC_TOTALS[${ELECTION_CANDIDATES.length}] = Enc(0)`);
+    }
+    
+    // ✅ Re-apply ALL vote blocks (idempotent, safe)
     for (const b of blockchain) {
         if (b.index === 0) continue;
-        if (b.blockType && b.blockType !== 'VOTE') continue;
+        if (b.blockType !== 'VOTE') continue;
         if (Array.isArray(b.encryptedVoteVector)) {
             applyEncryptedVectorToTotals(b.encryptedVoteVector);
         }
     }
-    console.log('Recomputed ENC_TOTALS from chain');
+    
+    console.log(`📊 Recomputed: ${ENC_TOTALS.length} totals from ${blockchain.length-1} blocks`);
 }
+
 
 function checkConsensus(blockHash) {
     if (!global.voteTally || !global.voteTally[blockHash]) return;
@@ -585,6 +635,14 @@ var handleBlockchainResponse = async (message) => {
         console.log('blockchain possibly behind. We got: ' + latestBlockHeld.index + ' Peer got: ' + latestBlockReceived.index);
         if (latestBlockHeld.hash === latestBlockReceived.previousHash) {
             console.log("We can append the received block to our chain");
+            if ((!latestBlockReceived.blockType || latestBlockReceived.blockType === 'VOTE') && Array.isArray(latestBlockReceived.encryptedVoteVector)) {
+                try {
+                    applyEncryptedVectorToTotals(latestBlockReceived.encryptedVoteVector);
+                    console.log('✅ Applied synced vote to ENC_TOTALS');
+                } catch (e) {
+                    console.error('❌ Failed to apply synced vote:', e.message);
+                }
+            }
             blockchain.push(latestBlockReceived);
             broadcast(responseLatestMsg());
         } else if (receivedBlocks.length === 1) {
@@ -646,6 +704,7 @@ var broadcast = (message) => sockets.forEach(socket => write(socket, message));
 (async () => {
     const rootOk = await fetchMerkleRoot();
     const heOk = await fetchHePublicKey();
+
     if (!rootOk || !heOk) {
         console.error('Cannot start without Merkle Root and HE key. Exiting.');
         process.exit(1);

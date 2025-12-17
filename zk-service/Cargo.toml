@@ -1,21 +1,24 @@
 [package]
-name = "zk-service"
+name = "paillier_zk_service"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axum = "0.7"
-tokio = { version = "1.0", features = ["full"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-zk-paillier = "0.4.4"
+anyhow = "1"
+axum = { version = "0.7", features = ["json"] }
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 hex = "0.4"
+sha2 = "0.10"
+rand = "0.8"
+rand_chacha = "0.3"
+generic-ec = { version = "0.4.5", features = ["curve-secp256k1"] }
 
-[dependencies.curv-kzen]
-version = "0.10"
-default-features = false
-
-[dependencies.paillier]
-package = "kzen-paillier"
-version = "0.4.3"
-default-features = false
+# FIXED: Match exact versions from error log + enable required features
+paillier-zk = "0.4.3"
+fast-paillier = "0.3"
+rug = { version = "1.28", default-features = false, features = ["integer", "std"] }  # ↑ FIXED

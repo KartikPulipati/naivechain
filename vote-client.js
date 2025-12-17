@@ -13,7 +13,7 @@ if (process.argv.length < 4) {
 const NODE_URL = process.argv[2];
 const VOTER_ID = process.argv[3];
 const VOTE_INDEX = parseInt(process.argv[4]) || 0;
-const ZK_URL = 'http://zk-service:5000';
+const ZK_URL = 'http://localhost:5000';
 
 async function main() {
     console.log(`🗳️  Voting on ${NODE_URL} for ${VOTER_ID}`);
@@ -50,11 +50,12 @@ async function main() {
     console.log(`📊 Vote vector: [${voteVector.join(', ')}]`);
 
     // 5. Generate REAL n+1 proofs + encrypted vector from zk-service
-    console.log('🔨 Generating REAL n+1 ZK proofs...');
-    const proofsRes = await axios.post(`${ZK_URL}/generateVoteProofs`, {
-        n: '0x' + HE_PUB.n.toString(16),
+    console.log('🔨 Generating ZK proofs...');
+    const proofsRes = await axios.post(`${ZK_URL}/generate_vote_proofs`, {
         vote_vector: voteVector
     }, { timeout: 10000 });
+
+
     
     const { encrypted_vote_vector: encryptedVoteVector, bit_proofs: bitProofs, sum_proof: sumProof } = proofsRes.data;
     
