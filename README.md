@@ -7,6 +7,11 @@ A proof-of-concept voting system using a blockchain plus homomorphic encryption 
 This project starts four containerized components: an **authority** service, a Rust **zk-service**, and three blockchain nodes (**node1**, **node2**, **node3**) wired together via Docker Compose.
 The authority exposes endpoints for the Merkle root and Paillier public key, which are used during voting.
 
+## Requirements (Install These)
+
+- Docker Desktop (recommended) or Docker Engine + Docker Compose.
+- Node.js (includes npm), since the voting and tally scripts are run with `node`.
+
 ## Start (Docker)
 
 Build and start everything:
