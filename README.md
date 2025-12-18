@@ -29,7 +29,7 @@ Example:
 node vote-client.js http://localhost:3001 VOTER001 0
 ```
 
-The vote client fetches a Merkle proof from the authority, gets the homomorphic encryption public key, requests the encrypted vote + ZK proofs from the zk-service, then submits everything to the chosen node.[2]
+The vote client fetches a Merkle proof from the authority, gets the homomorphic encryption public key, requests the encrypted vote + ZK proofs from the zk-service, then submits everything to the chosen node.
 
 ## Show results (client)
 
@@ -45,7 +45,7 @@ Example:
 node show-tally.js http://localhost:3001
 ```
 
-This script fetches encrypted totals from the node and sends them to the authority for decryption, then prints the plaintext totals per candidate.[3]
+This script fetches encrypted totals from the node and sends them to the authority for decryption, then prints the plaintext totals per candidate.
 
 ## Useful node endpoints
 
