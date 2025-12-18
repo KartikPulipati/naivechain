@@ -509,7 +509,6 @@ function bigIntToHex(x) {
 function ensureTotalsLength(len) {
     if (!ENC_TOTALS) {
         ENC_TOTALS = new Array(len).fill(1n);  // Initial Enc(0) for all
-        console.log(`Initialized ENC_TOTALS[${len}] = Enc(0)`);
     }
     
     // Truncate if too long (rare)
@@ -549,7 +548,6 @@ function recomputeEncryptedTotalsFromChain() {
     // ✅ Initialize only if missing
     if (!ENC_TOTALS) {
         ENC_TOTALS = new Array(ELECTION_CANDIDATES.length).fill(1n);
-        console.log(`✅ Initialized ENC_TOTALS[${ELECTION_CANDIDATES.length}] = Enc(0)`);
     }
     
     // ✅ Re-apply ALL vote blocks (idempotent, safe)
@@ -560,8 +558,6 @@ function recomputeEncryptedTotalsFromChain() {
             applyEncryptedVectorToTotals(b.encryptedVoteVector);
         }
     }
-    
-    console.log(`📊 Recomputed: ${ENC_TOTALS.length} totals from ${blockchain.length-1} blocks`);
 }
 
 

@@ -1,60 +1,62 @@
-# Naivechain - a blockchain implementation in 200 lines of code
+# Decentralized Blockchain Voting System
 
-### Motivation
-All the current implementations of blockchains are tightly coupled with the larger context and problems they (e.g. Bitcoin or Ethereum) are trying to solve. This makes understanding blockchains a necessarily harder task, than it must be. Especially source-code-wisely. This project is an attempt to provide as concise and simple implementation of a blockchain as possible.
+A proof-of-concept voting system using a blockchain plus homomorphic encryption and zero-knowledge proofs so nodes can validate votes without learning how anyone voted. This uses the [Naivechain](https://github.com/lhartikk/naivechain) implementation as a foundation. 
 
- 
-### What is blockchain
-[From Wikipedia](https://en.wikipedia.org/wiki/Blockchain_(database)) : Blockchain is a distributed database that maintains a continuously-growing list of records called blocks secured from tampering and revision.
+## What runs
 
-### Key concepts of Naivechain
-Check also [this blog post](https://medium.com/@lhartikk/a-blockchain-in-200-lines-of-code-963cc1cc0e54#.dttbm9afr5) for a more detailed overview of the key concepts
-* HTTP interface to control the node
-* Use Websockets to communicate with other nodes (P2P)
-* Super simple "protocols" in P2P communication
-* Data is not persisted in nodes
-* No proof-of-work or proof-of-stake: a block can be added to the blockchain without competition
+This project starts four containerized components: an **authority** service, a Rust **zk-service**, and three blockchain nodes (**node1**, **node2**, **node3**) wired together via Docker Compose.
+The authority exposes endpoints for the Merkle root and Paillier public key, which are used during voting.
 
+## Start (Docker)
 
-![alt tag](naivechain_blockchain.png)
+Build and start everything:
 
-![alt tag](naivechain_components.png)
-
-
-### Naivecoin
-For a more extensive tutorial about blockchains, you can check the project [Naivecoin](https://lhartikk.github.io/). It is based on Naivechain and implements for instance Proof-of-work, transactions and wallets.
-
-### Quick start
-(set up two connected nodes and mine 1 block)
-```
-npm install
-HTTP_PORT=3001 P2P_PORT=6001 npm start
-HTTP_PORT=3002 P2P_PORT=6002 PEERS=ws://localhost:6001 npm start
-curl -H "Content-type:application/json" --data '{"data" : "Some data to the first block"}' http://localhost:3001/mineBlock
+```bash
+docker-compose up --build
 ```
 
-### Quick start with Docker
-(set up three connected nodes and mine a block)
-###
-```sh
-docker-compose up
-curl -H "Content-type:application/json" --data '{"data" : "Some data to the first block"}' http://localhost:3001/mineBlock
+## Cast votes (client)
+
+In a separate terminal run the vote client:
+
+```bash
+node vote-client.js <node-url> <voter-id> <candidate-index>
 ```
 
-### HTTP API
-##### Get blockchain
+Example:
+
+```bash
+node vote-client.js http://localhost:3001 VOTER001 0
 ```
+
+The vote client fetches a Merkle proof from the authority, gets the homomorphic encryption public key, requests the encrypted vote + ZK proofs from the zk-service, then submits everything to the chosen node.[2]
+
+## Show results (client)
+
+Run the tally viewer:
+
+```bash
+node show-tally.js <node-url>
+```
+
+Example:
+
+```bash
+node show-tally.js http://localhost:3001
+```
+
+This script fetches encrypted totals from the node and sends them to the authority for decryption, then prints the plaintext totals per candidate.[3]
+
+## Useful node endpoints
+
+View the chain:
+
+```bash
 curl http://localhost:3001/blocks
 ```
-##### Create block
-```
-curl -H "Content-type:application/json" --data '{"data" : "Some data to the first block"}' http://localhost:3001/mineBlock
-``` 
-##### Add peer
-```
-curl -H "Content-type:application/json" --data '{"peer" : "ws://localhost:6001"}' http://localhost:3001/addPeer
-```
-#### Query connected peers
-```
-curl http://localhost:3001/peers
+
+View election config:
+
+```bash
+curl http://localhost:3001/config
 ```
